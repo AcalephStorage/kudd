@@ -15,8 +15,8 @@ ADD . /kudd
 WORKDIR /kudd
 
 RUN go get github.com/constabulary/gb/...
-RUN gb build ./...
+RUN gb build
 
 EXPOSE 9000
 CMD [	]
-ENTRYPOINT [ "/kudd/bin/kudd", "-kubectl", "/kubectl" ]
+ENTRYPOINT [ "/kudd/bin/kudd", "-kubectl-path", "/kubectl" ]
