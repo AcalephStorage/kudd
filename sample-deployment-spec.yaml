@@ -1,0 +1,29 @@
+---
+kind: Deployment
+apiVersion: extensions/v1beta1
+metadata:
+  name: {{.DeploymentName}}
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    app: appname
+    version: dev
+    commit: {{.Commit}}
+  stragegy: 
+    type: RollingUpdate
+  template:
+    metadata:
+      name: podname
+      namespace: acaleph
+      labels:
+        app: appname
+        version: dev
+        commit: {{.Commit}}
+    spec:
+      containers:
+        - name: appname
+          image: {{.Image}}
+          ports:
+            - containerPort: 9292
+          imagePullPolicy: Always
