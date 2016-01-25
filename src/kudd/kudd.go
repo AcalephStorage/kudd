@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"strings"
 
-	"encoding/json"
 	"io/ioutil"
 	"net/http"
 	"os/exec"
@@ -21,28 +18,10 @@ type Kudd struct {
 	kubectlPath string
 }
 
-type QuayWebhook struct {
-	Repository string   `json:"repository"`
-	Namespace  string   `json:"namespace"`
-	Name       string   `json:"name"`
-	DockerURL  string   `json:"docker_url"`
-	Homepage   string   `json:"homepage"`
-	Visibility string   `json:"visibility"`
-	BuildId    string   `json:"build_id"`
-	BuildName  string   `json:"build_name"`
-	DockerTags []string `json:"docker_tags"`
-
-	TriggerKind     string `json:"trigger_kind"`
-	TriggerId       string `json:"trigger_id"`
-	TriggerMetadata struct {
-		Commit string `json:"commit"`
-	} `json:"trigger_metadata"`
-}
-
 type TemplateData struct {
-	DeploymentName string
-	Image          string
-	Commit         string
+	Name   string
+	Branch string
+	Commit string
 }
 
 func main() {
@@ -70,94 +49,52 @@ func (k *Kudd) start() error {
 }
 
 func (k *Kudd) push(w http.ResponseWriter, r *http.Request) {
-	d, err := parseWebhook(r.Body)
+
+	defer r.Body.Close()
+
+	query := r.URL.Query()
+	name := query.Get("name")
+	branch := query.Get("branch")
+	commit := query.Get("commit")
+
+	data, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, err, http.StatusBadRequest, "unable to parse webhook")
+		writeError(w, err, http.StatusNotFound, "unable to read kudd file")
 		return
 	}
-
-	resourceTemplateUrl := r.URL.Query().Get("resource_url")
-	managedTag := r.URL.Query().Get("managed_tag")
-	deploymentName := r.URL.Query().Get("deployment_name")
-	commit := d.TriggerMetadata.Commit
-
-	isManaged := false
-	for _, tag := range d.DockerTags {
-		if tag == managedTag {
-			isManaged = true
-			break
-		}
-	}
-	if !isManaged {
-		log.Println("This build is not managed. Not deploying")
-		return
-	}
-
-	image := "quay.io/" + d.Repository + ":" + managedTag
-	log.Println("image: ", image)
-
-	resource, err := getDeploymentSpec(resourceTemplateUrl, deploymentName, image, commit)
+	kuddTemplate, err := template.New("kudd").Parse(string(data))
 	if err != nil {
-		writeError(w, err, http.StatusBadRequest, "unable to get resource file")
+		writeError(w, err, http.StatusBadRequest, "unable to parse kudd file")
 		return
 	}
 
-	err = k.deployResource(image, resource)
+	kuddData := TemplateData{
+		Name:   name,
+		Branch: branch,
+		Commit: commit,
+	}
+
+	var b bytes.Buffer
+	err = kuddTemplate.Execute(&b, kuddData)
+	if err != nil {
+		writeError(w, err, http.StatusNoContent, "unable to execute kudd file")
+		return
+	}
+	kuddDeploy := b.String()
+
+	err = k.deployResource(kuddDeploy, kuddData)
 	if err != nil {
 		writeError(w, err, http.StatusNoContent, "unable to deploy resource")
 		return
 	}
 }
 
-func getDeploymentSpec(templateUrl, deploymentName, image, commit string) (resource string, err error) {
-	res, err := http.Get(templateUrl)
-	if err != nil {
-		return
-	}
+func (k *Kudd) deployResource(kuddSpec string, kuddMeta TemplateData) error {
+	identifier := fmt.Sprintf("%s-%s-%s", kuddMeta.Name, kuddMeta.Branch, kuddMeta.Commit)
+	log.Println("Deploying spec: ", identifier)
 
-	defer res.Body.Close()
-	tmpl, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return
-	}
-
-	resourceTemplate, err := template.New("resource").Parse(string(tmpl))
-	if err != nil {
-		return
-	}
-
-	data := TemplateData{
-		DeploymentName: deploymentName,
-		Image:          image,
-		Commit:         commit,
-	}
-
-	var b bytes.Buffer
-	err = resourceTemplate.Execute(&b, data)
-	if err != nil {
-		return
-	}
-	resource = b.String()
-	return
-}
-
-func parseWebhook(r io.Reader) (v *QuayWebhook, err error) {
-	b, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	var d QuayWebhook
-	err = json.Unmarshal(b, &d)
-	return &d, err
-}
-
-func (k *Kudd) deployResource(image, resource string) error {
-	identifier := strings.Replace(image, ":", "-", -1)
-	identifier = strings.Replace(identifier, "/", "-", -1)
-	log.Println("Deploying resource: ", resource)
-	tempFile := fmt.Sprintf("/tmp/resource-%s.yaml", identifier)
-	if err := ioutil.WriteFile(tempFile, []byte(resource), 0644); err != nil {
+	tempFile := fmt.Sprintf("/tmp/kudd-%s.yaml", identifier)
+	if err := ioutil.WriteFile(tempFile, []byte(kuddSpec), 0644); err != nil {
 		log.Println("unable to write file", err)
 		return err
 	}
@@ -176,7 +113,7 @@ func (k *Kudd) deployResource(image, resource string) error {
 	log.Println("Updating...", cmd)
 	cmd = exec.Command(k.kubectlPath, "apply", "-f", tempFile, "--validate=false")
 	if err := cmd.Run(); err == nil {
-		log.Println("create successful")
+		log.Println("Update Successful")
 		return nil
 	} else {
 		log.Println("update failed")
